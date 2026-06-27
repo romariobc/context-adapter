@@ -3,7 +3,8 @@ adapters/claude_code.py
 Adapter: Project Brief → CLAUDE.md configuration for Claude Code.
 
 Gap 6 (Competitive Landscape): translates Brief to Claude Code context file.
-Enforces that lost[] must be empty before emitting output.
+Self-contained CLAUDE.md with full content (no "see other files" references).
+Enforces that lost[] must be empty before emitting output via report.validate().
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from fidelity.report import (
     FidelityReport,
     AdapterBlockedError,
     AdapterTarget,
+    Concept,
     LostConcept,
 )
 
@@ -26,13 +28,14 @@ class ClaudeCodeAdapter(ContextAdapter):
     Translates Project Brief → .claude/CLAUDE.md for Claude Code CLI.
     
     Maps Brief sections to CLAUDE.md structure:
-      - AGENTS.md → project title, context, stack, domains
-      - GUARDRAILS.md → prohibitions, conditionals
+      - AGENTS.md → project title, context, stack, domains, risk_zones
+      - GUARDRAILS.md → prohibitions (inline, not reference)
       - PLAYBOOK.md → session protocol
       - BUSINESS.md → out of scope rules
-      - decisions/index.md → active decisions table
+      - decisions/index.md → active decisions table (inline)
     
-    Enforces: lost[] must be empty or AdapterBlockedError is raised.
+    Enforces: lost[] must be empty (via report.validate()) or AdapterBlockedError is raised.
+    Self-contained: no "see other files" references in CLAUDE.md.
     """
     
     target = AdapterTarget.CLAUDE_CODE
@@ -41,6 +44,7 @@ class ClaudeCodeAdapter(ContextAdapter):
         super().__init__()
         self._translated = {}
         self._lost_concepts = []
+        self._preserved_concepts = []
     
     def translate(self, brief: dict) -> dict:
         """
@@ -53,11 +57,14 @@ class ClaudeCodeAdapter(ContextAdapter):
             dict with mapped configuration sections
         
         Raises:
-            AdapterBlockedError: if required fields are missing
+            AdapterBlockedError: if required fields are missing (with LostConcept details)
         """
         errors = self.validate(brief)
         if errors:
-            raise AdapterBlockedError([])
+            raise AdapterBlockedError([
+                LostConcept(concept=field, source_file="brief", reason=f"missing {field}")
+                for field in errors
+            ])
         
         self._translated = {
             "title": brief.get("AGENTS.md", {}).get("project_name", "⚠ PENDENTE"),
@@ -72,6 +79,12 @@ class ClaudeCodeAdapter(ContextAdapter):
             "decisions": brief.get("decisions/index.md", "⚠ PENDENTE"),
         }
         
+        # Track preserved concepts for FidelityReport
+        self._preserved_concepts = [
+            Concept(concept=k, source_file="AGENTS.md", target_file=".claude/CLAUDE.md")
+            for k in self._translated.keys() if self._translated[k] != "⚠ PENDENTE"
+        ]
+        
         return self._translated
     
     def generate_output(self, output_dir: Path) -> FidelityReport:
@@ -82,10 +95,10 @@ class ClaudeCodeAdapter(ContextAdapter):
             output_dir: directory for .claude/ (will create subdirectory)
         
         Returns:
-            FidelityReport with success/lost/warnings/output_files
+            FidelityReport with preserved concepts, lost items, and output files
         
         Raises:
-            AdapterBlockedError: if lost[] is non-empty (ENFORCEMENT)
+            AdapterBlockedError: if lost[] is non-empty (via report.validate())
         """
         output_dir = output_dir / ".claude"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -97,20 +110,20 @@ class ClaudeCodeAdapter(ContextAdapter):
         claude_md_path = output_dir / "CLAUDE.md"
         claude_md_path.write_text(content, encoding="utf-8")
         
-        # Create report
+        # Create report with preserved concepts (not translated dict)
         report = FidelityReport(
             project_slug=self._translated.get("title", "unknown"),
             adapter_target=AdapterTarget.CLAUDE_CODE,
             brief_version="1.0.0",
             generated_at=datetime.now(timezone.utc).isoformat(),
         )
-        report.translated = self._translated
+        report.preserved = self._preserved_concepts
         report.lost = self._lost_concepts
         report.output_files = [str(claude_md_path)]
         
-        # ENFORCE: if lost[] is non-empty, raise AdapterBlockedError
-        if report.lost:
-            raise AdapterBlockedError(report.lost)
+        # ENFORCE: report.validate() raises AdapterBlockedError if lost[] is non-empty
+        # This is the Gap 6 enforcement point
+        warnings = report.validate()
         
         return report
     
@@ -129,12 +142,15 @@ class ClaudeCodeAdapter(ContextAdapter):
         
         for field in required:
             if field not in brief or not brief[field]:
-                errors.append(f"missing {field}")
+                errors.append(field)
         
         return errors
     
     def _build_claude_md(self) -> str:
-        """Build complete CLAUDE.md content from translated Brief."""
+        """
+        Build complete CLAUDE.md content from translated Brief.
+        Self-contained: includes full content, not just references.
+        """
         lines = [
             f"# {self._translated.get('title', 'Project')}",
             "",
@@ -166,10 +182,19 @@ class ClaudeCodeAdapter(ContextAdapter):
         else:
             lines.append("⚠ PENDENTE")
         
+        # Bug 4 fix: include prohibitions inline instead of reference
         lines.extend([
             "",
             "## Proibições",
-            "Ver GUARDRAILS.md#prohibitions",
+        ])
+        prohibitions = self._translated.get("prohibitions", {})
+        if prohibitions:
+            for key, value in prohibitions.items():
+                lines.append(f"- {key}: {value}")
+        else:
+            lines.append("⚠ PENDENTE")
+        
+        lines.extend([
             "",
             "## Fora de Escopo",
         ])
@@ -181,10 +206,15 @@ class ClaudeCodeAdapter(ContextAdapter):
         else:
             lines.append("⚠ PENDENTE")
         
+        # Bug 4 fix: include decisions table inline instead of reference
         lines.extend([
             "",
             "## Decisões Ativas",
-            "Ver decisions/index.md",
         ])
+        decisions = self._translated.get("decisions", "⚠ PENDENTE")
+        if decisions and decisions != "⚠ PENDENTE":
+            lines.append(decisions)
+        else:
+            lines.append("⚠ PENDENTE")
         
         return "\n".join(lines)

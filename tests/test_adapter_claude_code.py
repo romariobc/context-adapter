@@ -1,7 +1,7 @@
 """
 tests/test_adapter_claude_code.py
 Unit tests for adapters/claude_code.py (P0-E specification).
-Minimum 15 tests required.
+Minimum 15 tests + 2 additional validation tests (17 total).
 Gap 6 enforcement: lost[] must be empty before emitting output.
 """
 import sys
@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from adapters.claude_code import ClaudeCodeAdapter
-from fidelity.report import AdapterBlockedError, AdapterTarget
+from fidelity.report import AdapterBlockedError, AdapterTarget, Concept, LostConcept
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def valid_brief():
             "risk_zones": ["zone1"],
         },
         "GUARDRAILS.md": {
-            "prohibitions": {"test": "prohibition"},
+            "prohibitions": {"test_block": "test prohibition"},
             "conditionals": [{"condition": "test"}],
         },
         "PLAYBOOK.md": {
@@ -148,6 +148,27 @@ class TestGap6Enforcement:
         report = adapter.generate_output(tmp_output_dir)
         assert len(report.output_files) > 0
         assert "CLAUDE.md" in report.output_files[0]
+
+
+# Test 16: FidelityReport.preserved (Bug 1 fix)
+class TestFidelityReportPreserved:
+    """Test 16: FidelityReport.preserved contains Concept objects"""
+    
+    def test_preserved_concepts_are_concept_type(self, adapter, valid_brief, tmp_output_dir):
+        adapter.translate(valid_brief)
+        report = adapter.generate_output(tmp_output_dir)
+        assert all(isinstance(c, Concept) for c in report.preserved)
+
+
+# Test 17: FidelityReport.translated should not exist (Bug 1 fix)
+class TestFidelityReportNoTranslated:
+    """Test 17: FidelityReport.translated attribute does not exist"""
+    
+    def test_report_translated_attribute_does_not_exist(self, adapter, valid_brief, tmp_output_dir):
+        adapter.translate(valid_brief)
+        report = adapter.generate_output(tmp_output_dir)
+        with pytest.raises(AttributeError):
+            _ = report.translated
 
 
 if __name__ == "__main__":
